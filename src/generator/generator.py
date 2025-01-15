@@ -1,4 +1,5 @@
 import argparse
+from ...schema.protobuf.et_def_pb2 import Node as ProtoNode, COMP_NODE, COMM_COLL_NODE, AttributeProto
 
 from ...schema.protobuf.et_def_pb2 import (
     ALL_GATHER,
@@ -195,6 +196,297 @@ def generate_comm_coll_node(num_npus: int, comm_size: int, comm_type: int, node_
             encode_message(et, node)
 
 
+
+
+def n8_node_two_cluster() -> None:
+    num_npus = 8
+    num_passes = 4
+    node_name = "n8_node_two_cluster"
+    filename = []
+    cmp_nodes = []
+
+    for npu_id in range(num_npus):
+        filename.append(f"{node_name}.{npu_id}.et")
+        
+    for layer in range(num_passes):
+        new_cmp_nodes = []
+        #for npu_id in range(num_npus):
+    
+def pars_config(config_file: str):
+    num_npus = 0
+    num_layers = 0
+    num_groups = 0
+    gr_members = []
+    comm_sizes = []
+    comm_types = []
+    comp_durations = []
+
+    with open(config_file, 'r') as file:
+            for i, line in enumerate(file):
+                line = line.strip()  # Remove leading/trailing whitespace
+                elements = line.split()  # Split the line into elements based on spaces
+                if (i == 0):
+                    num_npus = int(elements[1])
+                elif (i == 1):
+                    num_layers = int(elements[1])
+                elif (i == 2):
+                    num_groups = int(elements[1])
+                else:
+                    if (elements[0] == "comm_sizes:"):
+                        comm_sizes = list(map(int, elements[1:]))
+                    elif (elements[0] == "comm_types:"):
+                        comm_types = elements[1:]
+                    elif (elements[0] == "comp_durations:"):
+                        comp_durations = list(map(int, elements[1:])) 
+                    else: 
+                        insert = list(map(int, elements[1:])) 
+                        gr_members.append(insert)
+
+    return num_npus, num_layers, num_groups , gr_members, comm_sizes, comm_types, comp_durations
+                
+constant_map = {
+    "ALL_REDUCE" : ALL_REDUCE,
+    "ALL_GATHER" : ALL_GATHER,
+    "BROADCAST" : BROADCAST,
+    "ALL_TO_ALL" : ALL_TO_ALL,
+    "REDUCE_SCATTER" : REDUCE_SCATTER,
+    "BARRIER" : BARRIER
+}
+
+
+def mixed_flex(config_file: str) -> None:
+    #print (config_file)
+    num_npus, num_layers, num_groups , gr_members, comm_sizes, comm_types, comp_durations = pars_config(config_file)
+    #print(num_npus, num_layers, num_groups , gr_members, comm_sizes, comm_types, comp_durations )
+    node_name = "mixed_flex"
+    layer_flags = []
+    
+    for i in range(num_layers):
+        layer_flag = []
+        for j in range(num_groups):
+            node =  get_node("COMM_COLL_NODE", BARRIER)
+            node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            node.duration_micros = 0
+            layer_flag.append(node)
+        layer_flags.append(layer_flag)
+
+
+
+    for npu_id in range(num_npus):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            
+            for layer in range(num_layers):
+
+                group_id = 0
+                for g, gr in enumerate(gr_members):
+                    if npu_id in gr:
+                        group_id = g
+
+                #print("id: ", npu_id, " gr_id: ", group_id)
+                comp_node = get_node("COMP_NODE", COMP_NODE)
+                comp_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+                
+                comp_node.duration_micros = comp_durations[group_id]
+                if layer!=0:
+                    comp_node.data_deps.append(layer_flags[layer-1][group_id].id)
+                
+
+                comm_node = get_node("COMM_COLL_NODE", COMM_COLL_NODE)
+                comm_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+                comm_node.attr.extend([get_comm_type_attr(constant_map.get(comm_types[group_id])), ChakraAttr(name="comm_size", int64_val=comm_sizes[group_id])])
+                #print("mixed: " ,constant_map.get(comm_types[group_id]))
+                #print("gotta be: " ,ALL_GATHER)
+                
+                comm_node.data_deps.append(comp_node.id)
+                
+                #print (layer, group_id)
+                #layer_flags[layer][group_id].data_deps.append(comm_node.id)
+                
+                encode_message(et, comp_node)    
+                encode_message(et, comm_node) 
+
+                if npu_id==gr_members[group_id][-1]:
+                    encode_message(et, layer_flags[layer][group_id])  
+                #layer_flags[layer][group_id].data_deps.pop()
+                    #print("flag added: ",group_id )
+
+
+    
+                
+                    
+
+def mixed_single(num_npus: int, comm_size: int) -> None:
+    #print(f"num_npus type: {type(num_npus)}, value: {num_npus}")
+    
+    #generate_comm_coll_node(num_npus, comm_size, ALL_REDUCE, "mixed")
+    node_name = "mixed_single"
+    num_npus = int(float(num_npus))
+    for npu_id in range(int(num_npus/4)):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            node = get_node(node_name, COMM_COLL_NODE)
+            node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            node.attr.append(ChakraAttr(name="comm_type", int64_val=ALL_REDUCE))
+            node.attr.append(ChakraAttr(name="comm_size", int64_val=comm_size))
+            encode_message(et, node)
+
+    for npu_id in range(int(num_npus/4), int(num_npus/2)):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            node = get_node(node_name, COMM_COLL_NODE)
+            node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            node.attr.append(ChakraAttr(name="comm_type", int64_val=ALL_REDUCE))
+            node.attr.append(ChakraAttr(name="comm_size", int64_val=comm_size))
+            encode_message(et, node)
+
+    for npu_id in range(int(num_npus/2), int(3*num_npus/4)):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            node = get_node(node_name, COMM_COLL_NODE)
+            node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            node.attr.append(ChakraAttr(name="comm_type", int64_val=ALL_TO_ALL))
+            node.attr.append(ChakraAttr(name="comm_size", int64_val=comm_size))
+            encode_message(et, node)
+            
+    for npu_id in range(int(3*num_npus/4), num_npus):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            node = get_node(node_name, COMM_COLL_NODE)
+            node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            node.attr.append(ChakraAttr(name="comm_type", int64_val=ALL_TO_ALL))
+            node.attr.append(ChakraAttr(name="comm_size", int64_val=comm_size))
+            encode_message(et, node)
+
+def mixed_double(num_npus: int, comm_size: int) -> None:
+    """Generate one AllReduce communication collective node."""
+   
+    #generate_comm_coll_node(num_npus, comm_size, ALL_REDUCE, "mixed")
+    node_name = "mixed_double"
+    num_layers = 3
+    layer_flags_g1 = []
+    layer_flags_g2 = []
+    for i in range(num_layers):
+        node = get_node("FLAG_NODE", COMP_NODE)
+        node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+        node.duration_micros = 0
+        layer_flags_g1.append(node)
+        node2 = get_node("FLAG_NODE", COMP_NODE)
+        node2.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+        node2.duration_micros = 0
+        layer_flags_g2.append(node2)
+
+    for npu_id in range(num_npus):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            
+            for layer in range(num_layers):
+
+                comp_node = get_node("COMP_NODE", COMP_NODE)
+                comp_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+                if (npu_id%2==0):
+                    comp_node.duration_micros = 20
+                    if layer!=0:
+                        comp_node.data_deps.append(layer_flags_g1[layer-1].id)
+                else:
+                    comp_node.duration_micros = 30
+                    if layer!=0:
+                        comp_node.data_deps.append(layer_flags_g2[layer-1].id)
+                
+
+            
+                comm_node = get_node("COMM_COLL_NODE", COMM_COLL_NODE)
+                comm_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+                comm_node.attr.extend([get_comm_type_attr(ALL_REDUCE), ChakraAttr(name="comm_size", int64_val=comm_size)])
+                comm_node.data_deps.append(comp_node.id)
+                if (npu_id%2==0):
+                    layer_flags_g1[layer].data_deps.append(comm_node.id)
+                else:
+                    layer_flags_g2[layer].data_deps.append(comm_node.id)
+                encode_message(et, comp_node)    
+                encode_message(et, comm_node) 
+
+                if npu_id%2==0 and npu_id == num_npus-2:
+                    encode_message(et, layer_flags_g1[layer])  
+                if npu_id%2!=0 and npu_id == num_npus-1:
+                    encode_message(et, layer_flags_g2[layer])    
+                    
+
+                         
+
+    
+
+
+        
+
+        #child_node = get_node("COMP_NODE", COMM_COLL_NODE)
+        #child_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+        #child_node.attr.extend([get_comm_type_attr(ALL_TO_ALL), ChakraAttr(name="comm_size", int64_val=comm_size)])
+        #child_node.data_deps.append(node.id)
+        #encode_message(et, child_node)
+
+    
+
+    #for npu_id in range(int(num_npus/4), int(num_npus/2)):
+    #    output_filename = f"{node_name}.{npu_id}.et"
+    #    with open(output_filename, "wb") as et:
+    #        encode_message(et, GlobalMetadata(version="0.0.4"))
+
+    #        node = get_node(node_name, COMM_COLL_NODE)
+    #        node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+    #        node.attr.extend([get_comm_type_attr(ALL_TO_ALL), ChakraAttr(name="comm_size", int64_val=comm_size)])
+    #        encode_message(et, node)
+
+   #         child_node = get_node("COMP_NODE", COMM_COLL_NODE)
+     #       child_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+     #       child_node.attr.extend([get_comm_type_attr(ALL_TO_ALL), ChakraAttr(name="comm_size", int64_val=comm_size)])
+     #       child_node.data_deps.append(node.id)
+     #       encode_message(et, child_node)
+
+    """for npu_id in range(int(num_npus/2), int(3*num_npus/4)):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            node = get_node(node_name, COMM_COLL_NODE)
+            node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            node.attr.extend([get_comm_type_attr(ALL_TO_ALL), ChakraAttr(name="comm_size", int64_val=comm_size)])
+            encode_message(et, node)
+
+            child_node = get_node("COMP_NODE", COMM_COLL_NODE)
+            child_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            child_node.attr.extend([get_comm_type_attr(ALL_TO_ALL), ChakraAttr(name="comm_size", int64_val=comm_size)])
+            child_node.data_deps.append(node.id)
+            encode_message(et, child_node)
+            
+    for npu_id in range(int(3*num_npus/4), int(num_npus)):
+        output_filename = f"{node_name}.{npu_id}.et"
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+
+            node = get_node(node_name, COMM_COLL_NODE)
+            node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            node.attr.extend([get_comm_type_attr(ALL_TO_ALL), ChakraAttr(name="comm_size", int64_val=comm_size)])
+            encode_message(et, node)
+
+            child_node = get_node("COMP_NODE", COMM_COLL_NODE)
+            child_node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+            child_node.attr.extend([get_comm_type_attr(ALL_TO_ALL), ChakraAttr(name="comm_size", int64_val=comm_size)])
+            child_node.data_deps.append(node.id)
+            encode_message(et, child_node)
+    """
 def one_comm_coll_node_allreduce(num_npus: int, comm_size: int) -> None:
     """Generate one AllReduce communication collective node."""
     generate_comm_coll_node(num_npus, comm_size, ALL_REDUCE, "ALL_REDUCE")
@@ -259,23 +551,26 @@ def main() -> None:
     parser.add_argument(
         "--default_comm_size", type=int, default=65536, help="Default communication size of communication nodes"
     )
+    parser.add_argument("--config_file", type=str, default="config.txt", help="name of config file relative to script")
     args = parser.parse_args()
 
-    one_metadata_node_all_types(args.num_npus)
-    one_remote_mem_load_node(args.num_npus, args.default_tensor_size)
-    one_remote_mem_store_node(args.num_npus, args.default_tensor_size)
-    one_comp_node(args.num_npus, args.default_runtime)
-    two_comp_nodes_independent(args.num_npus, args.default_runtime)
-    two_comp_nodes_dependent(args.num_npus, args.default_runtime)
-    one_comm_coll_node_allreduce(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_alltoall(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_allgather(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_reducescatter(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_broadcast(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_barrier(args.num_npus)
-    one_comm_send_node(args.num_npus, args.default_tensor_size)
-    one_comm_recv_node(args.num_npus, args.default_tensor_size)
-
+    #one_metadata_node_all_types(args.num_npus)
+    #one_remote_mem_load_node(args.num_npus, args.default_tensor_size)
+    #one_remote_mem_store_node(args.num_npus, args.default_tensor_size)
+    #one_comp_node(args.num_npus, args.default_runtime)
+    #two_comp_nodes_independent(args.num_npus, args.default_runtime)
+    #two_comp_nodes_dependent(args.num_npus, args.default_runtime)
+    #one_comm_coll_node_allreduce(args.num_npus, args.default_comm_size)
+    #one_comm_coll_node_alltoall(args.num_npus, args.default_comm_size)
+    #one_comm_coll_node_allgather(args.num_npus, args.default_comm_size)
+    #one_comm_coll_node_reducescatter(args.num_npus, args.default_comm_size)
+    #one_comm_coll_node_broadcast(args.num_npus, args.default_comm_size)
+    #one_comm_coll_node_barrier(args.num_npus)
+    #one_comm_send_node(args.num_npus, args.default_tensor_size)
+    #one_comm_recv_node(args.num_npus, args.default_tensor_size)
+    #mixed_single(args.num_npus, args.default_comm_size)
+    #mixed_double(args.num_npus, args.default_comm_size)
+    mixed_flex(args.config_file)
 
 if __name__ == "__main__":
     main()
